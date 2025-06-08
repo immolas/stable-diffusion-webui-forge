@@ -110,7 +110,7 @@ def cmdargs(line):
 # === helpers for parsing, traversing the tree
 # ===========================================================================
 
-def text_to_tree(text, nest_delim="-", cancel_delim="x"):
+def text_to_tree(text, nest_delim="#", cancel_delim="x"):
     # record state for building the tree
     last_level = 0
     base = {"text": "", "children": [], "enabled": True}
@@ -157,6 +157,13 @@ def collect_lines(cur, path=[], results=None):
     if results is None:
         results = []
     if cur["enabled"] and "children" in cur and len(cur["children"]) > 0:
+        # if the line starts with a '!', add it as a prompt, even if it's not a leaf
+        if (m := re.match(r"^[ ]*!(.*)", cur['text'])):
+            # remove the '!' from the front
+            newtext = m.group(1).strip()
+            sofar = [x.strip() for x in path + [newtext] if x.strip() != '']
+            results.append(", ".join(sofar))
+
         for child in cur["children"]:
             # descend into the children
             collect_lines(child, path + [cur['text']], results)
@@ -174,18 +181,12 @@ def collect_lines(cur, path=[], results=None):
 # ===========================================================================
 
 class Script(scripts.Script):
-    def __init__(self):
-        super().__init__()
-        self.scenarios = self._load_scenarios()
-    
     def title(self):
         return "Scenario Tree"
 
-    def setup(self, p, *args):
-        return super().setup(p, *args)
-        self.scenarios = self._load_scenarios()
-
     def _load_scenarios(self):
+        print("* Loading scenarios from JSON...")
+        
         try:
             with open("scenarios.json", "r") as fp:
                 return json.load(fp)
@@ -205,6 +206,8 @@ class Script(scripts.Script):
 
 
     def ui(self, is_img2img):
+        self.scenarios = self._load_scenarios()
+
         checkbox_iterate = gr.Checkbox(label="Iterate seed every line", value=False, elem_id=self.elem_id("checkbox_iterate"))
         checkbox_iterate_batch = gr.Checkbox(label="Use same random seed for all lines", value=True, elem_id=self.elem_id("checkbox_iterate_batch"))
         prompt_position = gr.Radio(["start", "end"], label="Insert prompts at the", elem_id=self.elem_id("prompt_position"), value="end")
@@ -266,7 +269,9 @@ class Script(scripts.Script):
         ]
 
     def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined):
+        # convert text to tree
         base = text_to_tree(prompt_txt, nest_delim='#')
+        # convert tree to individual prompt lines
         lines = collect_lines(base)
 
         print("Got the following: ")
@@ -324,9 +329,9 @@ class Script(scripts.Script):
                 else:
                     copy_p.negative_prompt = p.negative_prompt + " " + args.get("negative_prompt")
 
-            # allow a special tag to disable the root prompt
-            if args.get("noroot"):
-                copy_p.prompt = args.get("prompt")
+            # allow a special symbol to disable the root prompt
+            if args.get("prompt", "").startswith("?"):
+                copy_p.prompt = args.get("prompt")[1:]
 
             proc = process_images(copy_p)
             images += proc.images
