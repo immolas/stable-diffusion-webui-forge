@@ -4,6 +4,8 @@ import shlex
 import re
 import json
 
+from copy import deepcopy
+
 import modules.scripts as scripts
 import gradio as gr
 
@@ -12,6 +14,9 @@ from modules.processing import Processed, process_images
 from modules.shared import state
 from modules.images import image_grid, save_image
 from modules.shared import opts
+
+from parsimonious import Grammar, NodeVisitor, ParseError
+
 
 def process_model_tag(tag):
     info = sd_models.get_closet_checkpoint_match(tag)
@@ -110,16 +115,93 @@ def cmdargs(line):
 # === helpers for parsing, traversing the tree
 # ===========================================================================
 
-def text_to_tree(text, nest_delim="#", cancel_delim="x"):
+var_grammar = Grammar(
+    r"""
+    full_text = ( var / var_text )*
+    var = ( var_set / var_op / var_ref  )
+    var_set = "{" var_name "=" full_text "}"
+    var_op = "{" var_name ":" full_text "}"
+    var_ref = "{" var_name "}"
+    var_name = ~"[a-zA-Z_][a-zA-Z0-9_]*"
+    var_text = ~"[^{}]*"
+    """
+)
+
+def replace_vars(text, vars_dict=None):
+    """
+    Look for variable references and operations of the following forms:
+    - {var:text}: sets var to text and inserts it into the parent string
+    - {var}: inserts the curent value of var into the parent string
+    - {var=text}: sets var to text, but doesn't insert anything at its location
+
+    Nested variables are supported, e.g.:
+    - {color=green} {clothing: a {color} sun dress} =>
+        text: "a green sun dress"
+        vars dict: {"color": "green", "clothing": "a green sun dress"}
+    Inner variables are replaced with values first.
+    """
+    if vars_dict is None:
+        vars_dict = {}
+
+    tree = var_grammar.parse(text)
+
+    class VarVisitor(NodeVisitor):
+        def visit_var_set(self, node, visited_children):
+            var_name = node.children[1].text
+            value = "".join(str(x) for x in visited_children)
+            vars_dict[var_name] = value
+            return ""
+
+        def visit_var_op(self, node, visited_children):
+            var_name = node.children[1].text
+            value = "".join(str(x) for x in visited_children)
+            vars_dict[var_name] = value
+            print(f"Setting variable '{var_name}' to '{value}'; {visited_children}")
+            return value
+
+        def visit_var_ref(self, node, visited_children):
+            var_name = node.children[1].text
+            return vars_dict.get(var_name, "")
+
+        def visit_var_text(self, node, visited_children):
+            return node.text
+
+        def generic_visit(self, node, visited_children):
+            return "".join(visited_children)
+
+    visitor = VarVisitor()
+
+    try:
+        result = visitor.visit(tree)
+    except ParseError as e:
+        raise ValueError(f"Error parsing variables in text: {text}") from e
+
+    if isinstance(result, str):
+        result = result.strip()
+
+    return result, vars_dict
+
+def text_to_tree(text, nest_delim="#", cancel_delim="x", verbose=False):
     # record state for building the tree
     last_level = 0
     base = {"text": "", "children": [], "enabled": True}
     path = [base]
 
     for line in text.strip().splitlines():
+        # ignore empty lines
+        if not line.strip():
+            continue
+
         # split the line into prefixes and text
-        m = re.match(r"([" + nest_delim + r"]* )?(.*)", line)
-        pre, text = m.groups()
+        matcher = r"([" + cancel_delim + "])?([" + nest_delim + r"]* )?(.*)"
+        m = re.match(matcher, line.strip())
+        canceller, pre, text = m.groups()
+
+        if verbose:
+            print(f"Matcher: {matcher}")
+            print(f"Processing line: '{line}'")
+            print(f"  Prefix: '{pre}', Text: '{text}'")
+            print(f"  Last level: {last_level}")
 
         # determine the depth of indentation
         level = len(pre) - 1 if pre is not None else 0
@@ -130,7 +212,7 @@ def text_to_tree(text, nest_delim="#", cancel_delim="x"):
         # - above (last_level > level): make curnode-1 the new curnode, append to children
         candidate = {
             "text": text, "children": [],
-            "enabled": pre is None or not pre.startswith(cancel_delim)
+            "enabled": pre is None or not canceller # not pre.startswith(cancel_delim)
         }
 
         if level == last_level:
@@ -153,28 +235,45 @@ def text_to_tree(text, nest_delim="#", cancel_delim="x"):
     return base
 
 # do a depth-first traversal to construct lines
-def collect_lines(cur, path=[], results=None):
+def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
+    """
+    Collect lines from the tree, replacing variables in the text.
+    The path is used to build the full text for each line.
+    The results are accumulated in the results list.
+    The vars_dict is used to store variable values for replacement.
+    """
+
+    if not isinstance(cur, dict):
+        raise ValueError("Current node must be a dictionary representing a tree node.")
+
+    if vars_dict is None:
+        vars_dict = {}
+
     if results is None:
         results = []
+
     if cur["enabled"] and "children" in cur and len(cur["children"]) > 0:
         # if the line starts with a '!', add it as a prompt, even if it's not a leaf
         if (m := re.match(r"^[ ]*!(.*)", cur['text'])):
             # remove the '!' from the front
             newtext = m.group(1).strip()
             sofar = [x.strip() for x in path + [newtext] if x.strip() != '']
-            results.append(", ".join(sofar))
+            results.append(join_str.join(sofar))
+
+        full_text, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
 
         for child in cur["children"]:
             # descend into the children
-            collect_lines(child, path + [cur['text']], results)
+            collect_lines(child, path + [full_text], results, vars_dict=new_vars_dict)
     else:
         if cur["enabled"]:
-            # it's a leaf, add it to the results
-            sofar = [x.strip() for x in path + [cur['text']] if x.strip() != '']
-            results.append(", ".join(sofar))
-    
-    return results
+            full_text, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
 
+            # it's a leaf, add it to the results
+            sofar = [x.strip() for x in path + [full_text] if x.strip() != '']
+            results.append(join_str.join(sofar))
+
+    return results
 
 # ===========================================================================
 # === main script implementation
@@ -186,7 +285,7 @@ class Script(scripts.Script):
 
     def _load_scenarios(self):
         print("* Loading scenarios from JSON...")
-        
+
         try:
             with open("scenarios.json", "r") as fp:
                 return json.load(fp)
@@ -237,7 +336,7 @@ class Script(scripts.Script):
         def refresh_scenarios():
             self.scenarios = self._load_scenarios()
             return gr.Dropdown(choices=list(self.scenarios.keys()), label="Saved scenarios", show_label=False, container=False)
-        
+
         refresh_scenario_btn.click(refresh_scenarios, outputs=[scenarios_dropdown])
 
         def save_scenario(new_scenario_box, prompt_txt):
@@ -271,8 +370,20 @@ class Script(scripts.Script):
     def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined):
         # convert text to tree
         base = text_to_tree(prompt_txt, nest_delim='#')
+
+        # resolve variables in the root prompt and root neg prompt
+        resolved_prompt = ""
+        vars_dict = {}
+        resolved_neg_prompt = ""
+        neg_vars_dict = {}
+        
+        if p.prompt:
+            resolved_prompt, vars_dict = replace_vars(p.prompt, vars_dict=vars_dict)
+        if p.negative_prompt:
+            resolved_neg_prompt, neg_vars_dict = replace_vars(p.negative_prompt, vars_dict=neg_vars_dict)
+
         # convert tree to individual prompt lines
-        lines = collect_lines(base)
+        lines, _ = collect_lines(base, vars_dict=deepcopy(vars_dict))
 
         print("Got the following: ")
         for idx, line in enumerate(lines):
@@ -317,17 +428,21 @@ class Script(scripts.Script):
                 else:
                     setattr(copy_p, k, v)
 
-            if args.get("prompt") and p.prompt:
-                if prompt_position == "start":
-                    copy_p.prompt = args.get("prompt") + " " + p.prompt
-                else:
-                    copy_p.prompt = p.prompt + " " + args.get("prompt")
+            if args.get("prompt") and resolved_prompt:
+                # evaluate vars in p.prompt
+                vars_dict = {}
+                resolved_prompt = replace_vars(p.prompt, vars_dict=vars_dict)
 
-            if args.get("negative_prompt") and p.negative_prompt:
                 if prompt_position == "start":
-                    copy_p.negative_prompt = args.get("negative_prompt") + " " + p.negative_prompt
+                    copy_p.prompt = args.get("prompt") + " " + resolved_prompt
                 else:
-                    copy_p.negative_prompt = p.negative_prompt + " " + args.get("negative_prompt")
+                    copy_p.prompt = resolved_prompt + " " + args.get("prompt")
+
+            if args.get("negative_prompt") and resolved_neg_prompt:
+                if prompt_position == "start":
+                    copy_p.negative_prompt = args.get("negative_prompt") + " " + resolved_neg_prompt
+                else:
+                    copy_p.negative_prompt = resolved_neg_prompt + " " + args.get("negative_prompt")
 
             # allow a special symbol to disable the root prompt
             if args.get("prompt", "").startswith("?"):
@@ -344,9 +459,9 @@ class Script(scripts.Script):
         if make_combined and len(images) > 1:
             combined_image = image_grid(images, batch_size=1, rows=None).convert("RGB")
             full_infotext = "\n".join(infotexts)
-            
+
             is_img2img = getattr(p, "init_images", None) is not None
-            
+
             if opts.grid_save:  #   use grid specific Settings
                 save_image(
                     combined_image,
