@@ -127,7 +127,7 @@ var_grammar = Grammar(
     """
 )
 
-def replace_vars(text, vars_dict=None):
+def replace_vars(text, vars_dict=None, force_retrieve=False):
     """
     Look for variable references and operations of the following forms:
     - {var:text}: sets var to text and inserts it into the parent string
@@ -147,23 +147,34 @@ def replace_vars(text, vars_dict=None):
 
     class VarVisitor(NodeVisitor):
         def visit_var_set(self, node, visited_children):
+            # of the form {var_name=text}
+            # this "hard" sets the variable, i.e. if it was previously defined it's overwritten
+            # nothing is inserted into the parent string
             var_name = node.children[1].text
             value = "".join(str(x) for x in visited_children)
             vars_dict[var_name] = value
             return ""
 
         def visit_var_op(self, node, visited_children):
+            # of the form {var_name:text}
+            # this "soft" sets the variable, i.e. if it was previously defined it's *not* overwritten
+            # the value is inserted into the parent string
             var_name = node.children[1].text
-            value = "".join(str(x) for x in visited_children)
-            vars_dict[var_name] = value
+            candidate_value = "".join(str(x) for x in visited_children)
+            # always retrieve from vars dict first, then resort to setting to the given value
+            value = vars_dict.get(var_name, candidate_value)
             print(f"Setting variable '{var_name}' to '{value}'; {visited_children}")
             return value
 
         def visit_var_ref(self, node, visited_children):
+            # of the form {var_name}
+            # simply looks up the value of the variable if set and inserts it
+            # if it's not set, returns an empty string
             var_name = node.children[1].text
             return vars_dict.get(var_name, "")
 
         def visit_var_text(self, node, visited_children):
+            # a basic text value, used as-is
             return node.text
 
         def generic_visit(self, node, visited_children):
@@ -181,7 +192,7 @@ def replace_vars(text, vars_dict=None):
 
     return result, vars_dict
 
-def text_to_tree(text, nest_delim="#", cancel_delim="x", verbose=False):
+def text_to_tree(text, nest_delim="#", cancel_delim="x", verbose=True):
     # record state for building the tree
     last_level = 0
     base = {"text": "", "children": [], "enabled": True}
@@ -241,6 +252,10 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
     The path is used to build the full text for each line.
     The results are accumulated in the results list.
     The vars_dict is used to store variable values for replacement.
+
+    Result is a list of tuples (line, vars_dict) where:
+    - line is the full text for the line, with variables replaced
+    - vars_dict is the dictionary of variables for this line, with any new variables set
     """
 
     if not isinstance(cur, dict):
@@ -252,26 +267,37 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
     if results is None:
         results = []
 
+    new_vars_dict = None
+
+    print(f"Collecting from: {cur['text']}")
+
     if cur["enabled"] and "children" in cur and len(cur["children"]) > 0:
         # if the line starts with a '!', add it as a prompt, even if it's not a leaf
         if (m := re.match(r"^[ ]*!(.*)", cur['text'])):
             # remove the '!' from the front
             newtext = m.group(1).strip()
+            cur['text'] = newtext # and remove the '!' from the text
+            print(f"Found a prompt with a shebang: {newtext}")
+            # do full var replacement, since this is a leaf
+            full_text, new_vars_dict = replace_vars(newtext, vars_dict=deepcopy(vars_dict))
             sofar = [x.strip() for x in path + [newtext] if x.strip() != '']
-            results.append(join_str.join(sofar))
+            results.append((join_str.join(sofar), new_vars_dict))
 
-        full_text, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
+        # parse variables in the string into the vars dict, but don't retain var resolution in the text
+        # (basically, this causes variable sets and refs to remain in the text)
+        _, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
 
         for child in cur["children"]:
             # descend into the children
-            collect_lines(child, path + [full_text], results, vars_dict=new_vars_dict)
+            collect_lines(child, path + [cur['text']], results, vars_dict=new_vars_dict)
     else:
         if cur["enabled"]:
+            # do full var replacement, since this is a leaf
             full_text, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
 
             # it's a leaf, add it to the results
             sofar = [x.strip() for x in path + [full_text] if x.strip() != '']
-            results.append(join_str.join(sofar))
+            results.append((join_str.join(sofar), new_vars_dict))
 
     return results
 
@@ -368,25 +394,27 @@ class Script(scripts.Script):
         ]
 
     def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined):
+        # save prompt text to _last_scenario.txt, just in case
+        with open("_last_scenario.txt", "w") as f:
+            f.write(prompt_txt)
+
         # convert text to tree
         base = text_to_tree(prompt_txt, nest_delim='#')
 
         # resolve variables in the root prompt and root neg prompt
-        resolved_prompt = ""
         vars_dict = {}
-        resolved_neg_prompt = ""
         neg_vars_dict = {}
         
         if p.prompt:
-            resolved_prompt, vars_dict = replace_vars(p.prompt, vars_dict=vars_dict)
+            _, vars_dict = replace_vars(p.prompt, vars_dict=vars_dict)
         if p.negative_prompt:
-            resolved_neg_prompt, neg_vars_dict = replace_vars(p.negative_prompt, vars_dict=neg_vars_dict)
+            _, neg_vars_dict = replace_vars(p.negative_prompt, vars_dict=neg_vars_dict)
 
-        # convert tree to individual prompt lines
-        lines, _ = collect_lines(base, vars_dict=deepcopy(vars_dict))
+        # convert tree to individual prompt lines plus var context dict per line
+        lines_dicts = collect_lines(base, vars_dict=deepcopy(vars_dict))
 
         print("Got the following: ")
-        for idx, line in enumerate(lines):
+        for idx, (line, _) in enumerate(lines_dicts):
             print(f"{idx}: {line}")
         print()
 
@@ -395,7 +423,7 @@ class Script(scripts.Script):
         job_count = 0
         jobs = []
 
-        for line in lines:
+        for line, var_dict in lines_dicts:
             if "--" in line:
                 try:
                     args = cmdargs(line)
@@ -405,11 +433,14 @@ class Script(scripts.Script):
             else:
                 args = {"prompt": line}
 
+            # add in the line's variables for use later
+            args["var_dict"] = var_dict
+
             job_count += args.get("n_iter", p.n_iter)
 
             jobs.append(args)
 
-        print(f"Will process {len(lines)} lines in {job_count} jobs.")
+        print(f"Will process {len(lines_dicts)} lines in {job_count} jobs.")
         if (checkbox_iterate or checkbox_iterate_batch) and p.seed == -1:
             p.seed = int(random.randrange(4294967294))
 
@@ -428,21 +459,24 @@ class Script(scripts.Script):
                 else:
                     setattr(copy_p, k, v)
 
-            if args.get("prompt") and resolved_prompt:
-                # evaluate vars in p.prompt
-                vars_dict = {}
-                resolved_prompt = replace_vars(p.prompt, vars_dict=vars_dict)
-
+            if args.get("prompt") and p.prompt:
                 if prompt_position == "start":
-                    copy_p.prompt = args.get("prompt") + " " + resolved_prompt
+                    result = args.get("prompt") + " " + p.prompt
                 else:
-                    copy_p.prompt = resolved_prompt + " " + args.get("prompt")
+                    result = p.prompt + " " + args.get("prompt")
 
-            if args.get("negative_prompt") and resolved_neg_prompt:
+                # use this line's resolved variables to peform a replacement
+                # on the entire string, including the base prompt. this allows
+                # us to replace variables that were initially assigned in the base.
+                resolved_prompt, _ = replace_vars(result, vars_dict=deepcopy(args.get("var_dict", {})), force_retrieve=True)
+
+                copy_p.prompt = resolved_prompt
+
+            if args.get("negative_prompt") and p.negative_prompt:
                 if prompt_position == "start":
-                    copy_p.negative_prompt = args.get("negative_prompt") + " " + resolved_neg_prompt
+                    copy_p.negative_prompt = args.get("negative_prompt") + " " + p.negative_prompt
                 else:
-                    copy_p.negative_prompt = resolved_neg_prompt + " " + args.get("negative_prompt")
+                    copy_p.negative_prompt = p.negative_prompt + " " + args.get("negative_prompt")
 
             # allow a special symbol to disable the root prompt
             if args.get("prompt", "").startswith("?"):
