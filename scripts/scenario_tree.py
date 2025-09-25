@@ -164,6 +164,8 @@ def replace_vars(text, vars_dict=None, force_retrieve=False):
             # always retrieve from vars dict first, then resort to setting to the given value
             value = vars_dict.get(var_name, candidate_value)
             print(f"Setting variable '{var_name}' to '{value}'; {visited_children}")
+            if force_retrieve or var_name not in vars_dict:
+                vars_dict[var_name] = value
             return value
 
         def visit_var_ref(self, node, visited_children):
