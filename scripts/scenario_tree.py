@@ -248,7 +248,7 @@ def text_to_tree(text, nest_delim="#", cancel_delim="x", verbose=True):
     return base
 
 # do a depth-first traversal to construct lines
-def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
+def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", ", every_line_generates=False):
     """
     Collect lines from the tree, replacing variables in the text.
     The path is used to build the full text for each line.
@@ -271,11 +271,19 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
 
     new_vars_dict = None
 
-    print(f"Collecting from: {cur['text']}")
+    print(f"Collecting from: {cur['text']} (children: {len(cur.get('children', []))})")
 
     if cur["enabled"] and "children" in cur and len(cur["children"]) > 0:
-        # if the line starts with a '!', add it as a prompt, even if it's not a leaf
-        if (m := re.match(r"^[ ]*!(.*)", cur['text'])):
+        if every_line_generates:
+            # force all non-leaf nodes to be treated as leaves
+            full_text, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
+            sofar = [x.strip() for x in path + [full_text] if x.strip() != '']
+            # ensure only non-empty lines are added
+            if join_str.join(sofar).strip() != "":
+                results.append((join_str.join(sofar), new_vars_dict))
+                print(f"Added non-leaf node as a prompt due to every_line_generates=True: {join_str.join(sofar)}")
+        elif (m := re.match(r"^[ ]*!(.*)", cur['text'])):
+            # if the line starts with a '!', add it as a prompt, even if it's not a leaf
             # remove the '!' from the front
             newtext = m.group(1).strip()
             cur['text'] = newtext # and remove the '!' from the text
@@ -291,7 +299,7 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
 
         for child in cur["children"]:
             # descend into the children
-            collect_lines(child, path + [cur['text']], results, vars_dict=new_vars_dict)
+            collect_lines(child, path + [cur['text']], results, vars_dict=new_vars_dict, every_line_generates=every_line_generates)
     else:
         if cur["enabled"]:
             # do full var replacement, since this is a leaf
@@ -308,6 +316,24 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", "):
 # ===========================================================================
 
 class Script(scripts.Script):
+    # refs to parts of the UI; will be filled by after_component
+    txt2img_prompt = None
+    txt2img_neg_prompt = None
+    img2img_prompt = None
+    img2img_neg_prompt = None
+
+    def after_component(self, component, **kwargs):
+        elem_id = kwargs.get("elem_id", None)
+
+        if elem_id == "txt2img_prompt":
+            Script.txt2img_prompt = component
+        elif elem_id == "txt2img_neg_prompt":
+            Script.txt2img_neg_prompt = component
+        elif elem_id == "img2img_prompt":
+            Script.img2img_prompt = component
+        elif elem_id == "img2img_neg_prompt":
+            Script.img2img_neg_prompt = component
+
     def title(self):
         return "Scenario Tree"
 
@@ -337,10 +363,21 @@ class Script(scripts.Script):
 
         checkbox_iterate = gr.Checkbox(label="Iterate seed every line", value=False, elem_id=self.elem_id("checkbox_iterate"))
         checkbox_iterate_batch = gr.Checkbox(label="Use same random seed for all lines", value=True, elem_id=self.elem_id("checkbox_iterate_batch"))
+        every_line_generates = gr.Checkbox(label="Every line generates an image", value=True, elem_id=self.elem_id("every_line_generates"))
         prompt_position = gr.Radio(["start", "end"], label="Insert prompts at the", elem_id=self.elem_id("prompt_position"), value="end")
         make_combined = gr.Checkbox(label="Make a combined image containing all outputs (if more than one)", value=False)
 
         prompt_txt = gr.Textbox(label="List of prompt inputs", lines=3, elem_id=self.elem_id("prompt_txt"))
+
+        # -----------------------
+        # acquire references to base prompts, depending on mode
+        # -----------------------
+        if is_img2img:
+            base_prompt_comp = Script.img2img_prompt
+            base_neg_prompt_comp = Script.img2img_neg_prompt
+        else:
+            base_prompt_comp = Script.txt2img_prompt
+            base_neg_prompt_comp = Script.txt2img_neg_prompt
 
         # -----------------------
         # saving, loading scenarios
@@ -367,10 +404,16 @@ class Script(scripts.Script):
 
         refresh_scenario_btn.click(refresh_scenarios, outputs=[scenarios_dropdown])
 
-        def save_scenario(new_scenario_box, prompt_txt):
+        def save_scenario(new_scenario_box, prompt_txt, base_prompt, base_neg_prompt):
             if not new_scenario_box or new_scenario_box.strip() == "":
                 return
-            self.scenarios[new_scenario_box] = prompt_txt
+            
+            self.scenarios[new_scenario_box] = {
+                "text": prompt_txt,
+                "base_prompt": base_prompt or "",
+                "base_neg_prompt": base_neg_prompt or ""
+            }
+
             self._save_scenarios(self.scenarios)
             return gr.Dropdown(choices=list(self.scenarios.keys()), label="Saved scenarios", show_label=False, container=False)
 
@@ -380,11 +423,17 @@ class Script(scripts.Script):
                 self._save_scenarios(self.scenarios)
             return gr.Dropdown(choices=list(self.scenarios.keys()), label="Saved scenarios", show_label=False, container=False)
 
-        scenario_save_btn.click(save_scenario, inputs=[new_scenario_box, prompt_txt], outputs=[scenarios_dropdown])
+        scenario_save_btn.click(
+            save_scenario, inputs=[
+                new_scenario_box, prompt_txt, base_prompt_comp, base_neg_prompt_comp
+            ], outputs=[
+                scenarios_dropdown
+            ]
+        )
         scenario_del_btn.click(delete_scenario, inputs=[new_scenario_box], outputs=[scenarios_dropdown])
 
         load_scenario_btn.click(
-            lambda scenario: (self.scenarios[scenario], scenario),
+            lambda scenario: (self.scenarios[scenario]["text"], scenario),
             inputs=[scenarios_dropdown],
             outputs=[prompt_txt, new_scenario_box]
         )
@@ -392,10 +441,11 @@ class Script(scripts.Script):
         return [
             checkbox_iterate, checkbox_iterate_batch, prompt_position,
             prompt_txt,
-            make_combined
+            make_combined,
+            every_line_generates
         ]
 
-    def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined):
+    def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined, every_line_generates):
         # save prompt text to _last_scenario.txt, just in case
         with open("_last_scenario.txt", "w") as f:
             f.write(prompt_txt)
@@ -413,7 +463,7 @@ class Script(scripts.Script):
             _, neg_vars_dict = replace_vars(p.negative_prompt, vars_dict=neg_vars_dict)
 
         # convert tree to individual prompt lines plus var context dict per line
-        lines_dicts = collect_lines(base, vars_dict=deepcopy(vars_dict))
+        lines_dicts = collect_lines(base, vars_dict=deepcopy(vars_dict), every_line_generates=every_line_generates)
 
         print("Got the following: ")
         for idx, (line, _) in enumerate(lines_dicts):
