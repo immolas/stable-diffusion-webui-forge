@@ -361,13 +361,37 @@ class Script(scripts.Script):
     def ui(self, is_img2img):
         self.scenarios = self._load_scenarios()
 
+        # Load last scenario text if it exists
+        last_scenario_text = ""
+        try:
+            with open("_last_scenario.txt", "r") as f:
+                last_scenario_text = f.read()
+        except FileNotFoundError:
+            pass
+
         checkbox_iterate = gr.Checkbox(label="Iterate seed every line", value=False, elem_id=self.elem_id("checkbox_iterate"))
         checkbox_iterate_batch = gr.Checkbox(label="Use same random seed for all lines", value=True, elem_id=self.elem_id("checkbox_iterate_batch"))
         every_line_generates = gr.Checkbox(label="Every line generates an image", value=True, elem_id=self.elem_id("every_line_generates"))
         prompt_position = gr.Radio(["start", "end"], label="Insert prompts at the", elem_id=self.elem_id("prompt_position"), value="end")
         make_combined = gr.Checkbox(label="Make a combined image containing all outputs (if more than one)", value=False)
 
-        prompt_txt = gr.Textbox(label="List of prompt inputs", lines=3, elem_id=self.elem_id("prompt_txt"))
+        prompt_txt = gr.Textbox(
+            label="List of prompt inputs",
+            lines=3, elem_id=self.elem_id("prompt_txt"),
+            value=last_scenario_text
+        )
+
+        # add read-only textboxes that show the base prompts
+        base_prompt_txt = gr.Textbox(
+            label="Base prompt (when saved)",
+            lines=2, elem_id=self.elem_id("base_prompt_txt"),
+            interactive=False
+        )
+        base_neg_prompt_txt = gr.Textbox(
+            label="Base negative prompt (when saved)",
+            lines=2, elem_id=self.elem_id("base_neg_prompt_txt"),
+            interactive=False
+        )
 
         # -----------------------
         # acquire references to base prompts, depending on mode
@@ -433,9 +457,13 @@ class Script(scripts.Script):
         scenario_del_btn.click(delete_scenario, inputs=[new_scenario_box], outputs=[scenarios_dropdown])
 
         load_scenario_btn.click(
-            lambda scenario: (self.scenarios[scenario]["text"], scenario),
+            lambda scenario: (
+                self.scenarios[scenario]["text"], scenario,
+                self.scenarios[scenario].get("base_prompt", ""),
+                self.scenarios[scenario].get("base_neg_prompt", "")
+            ),
             inputs=[scenarios_dropdown],
-            outputs=[prompt_txt, new_scenario_box]
+            outputs=[prompt_txt, new_scenario_box, base_prompt_txt, base_neg_prompt_txt]
         )
 
         return [
