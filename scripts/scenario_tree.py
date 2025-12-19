@@ -73,10 +73,20 @@ def cmdargs(line):
     pos = 0
     res = {}
 
+    rest = []
+
     while pos < len(args):
         arg = args[pos]
 
-        assert arg.startswith("--"), f'must start with "--": {arg}'
+        # skip non-option arguments
+        if not arg.startswith("--"):
+            rest.append(arg)
+            pos += 1
+            continue
+
+        # assert arg.startswith("--"), f'must start with "--": {arg}'
+
+        # ensure if we found an arg, it has a value
         assert pos+1 < len(args), f'missing argument for command line option {arg}'
 
         tag = arg[2:]
@@ -108,7 +118,7 @@ def cmdargs(line):
 
         pos += 2
 
-    return res
+    return res, " ".join(rest)
 
 
 # ===========================================================================
@@ -382,16 +392,17 @@ class Script(scripts.Script):
         )
 
         # add read-only textboxes that show the base prompts
-        base_prompt_txt = gr.Textbox(
-            label="Base prompt (when saved)",
-            lines=2, elem_id=self.elem_id("base_prompt_txt"),
-            interactive=False
-        )
-        base_neg_prompt_txt = gr.Textbox(
-            label="Base negative prompt (when saved)",
-            lines=2, elem_id=self.elem_id("base_neg_prompt_txt"),
-            interactive=False
-        )
+        with gr.Accordion("Base prompts (saved)", open=False, elem_id=self.elem_id("base_prompts_acc")):
+            base_prompt_txt = gr.Textbox(
+                label="Base prompt (when saved)",
+                lines=2, elem_id=self.elem_id("base_prompt_txt"),
+                interactive=False
+            )
+            base_neg_prompt_txt = gr.Textbox(
+                label="Base negative prompt (when saved)",
+                lines=2, elem_id=self.elem_id("base_neg_prompt_txt"),
+                interactive=False
+            )
 
         # -----------------------
         # acquire references to base prompts, depending on mode
@@ -417,9 +428,20 @@ class Script(scripts.Script):
 
         # name, textbox for new scenarios
         with gr.Row():
-            new_scenario_box = gr.Textbox(label="", show_label=False, scale=2, container=False)
+            new_scenario_box = gr.Textbox(label="", show_label=False, scale=2, container=False, value="")
             scenario_save_btn = gr.Button(value="Save", scale=0)
             scenario_del_btn = gr.Button(value="Delete", scale=0)
+
+        # add a button that loads _last_scenario.txt into the prompt box
+        def load_last_scenario():
+            try:
+                with open("_last_scenario.txt", "r") as f:
+                    return f.read()
+            except FileNotFoundError:
+                return ""
+        load_last_btn = gr.Button(value="Load last scenario", elem_id=self.elem_id("load_last_btn"))
+        load_last_btn.click(load_last_scenario, outputs=[prompt_txt])
+
 
         # handlers
         def refresh_scenarios():
@@ -506,7 +528,8 @@ class Script(scripts.Script):
         for line, var_dict in lines_dicts:
             if "--" in line:
                 try:
-                    args = cmdargs(line)
+                    args, rest = cmdargs(line)
+                    args = {"prompt": rest, **args}
                 except Exception:
                     errors.report(f"Error parsing line {line} as commandline", exc_info=True)
                     args = {"prompt": line}
