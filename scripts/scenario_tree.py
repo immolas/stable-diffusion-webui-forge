@@ -258,7 +258,7 @@ def text_to_tree(text, nest_delim="#", cancel_delim="x", verbose=True):
     return base
 
 # do a depth-first traversal to construct lines
-def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=", ", every_line_generates=False):
+def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=" , ", every_line_generates=False):
     """
     Collect lines from the tree, replacing variables in the text.
     The path is used to build the full text for each line.
@@ -529,6 +529,7 @@ class Script(scripts.Script):
             if "--" in line:
                 try:
                     args, rest = cmdargs(line)
+                    print(f"Parsed line as commandline args: {args}, rest: '{rest}'")
                     args = {"prompt": rest, **args}
                 except Exception:
                     errors.report(f"Error parsing line {line} as commandline", exc_info=True)
