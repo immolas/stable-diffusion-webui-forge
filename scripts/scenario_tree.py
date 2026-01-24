@@ -3,6 +3,7 @@ import random
 import shlex
 import re
 import json
+import uuid
 
 from copy import deepcopy
 
@@ -372,16 +373,26 @@ class Script(scripts.Script):
         self.scenarios = self._load_scenarios()
 
         # Load last scenario text if it exists
+        last_scenario = {}
         last_scenario_text = ""
         try:
-            with open("_last_scenario.txt", "r") as f:
-                last_scenario_text = f.read()
+            with open("_last_scenario.json", "r") as f:
+                payload = f.read()
+                try: 
+                    last_scenario = json.loads(payload)
+                    last_scenario_text = last_scenario.get("text", "")
+                    last_scenario_prompt = last_scenario.get("prompt", "")
+                    last_scenario_prompt_neg = last_scenario.get("negative_prompt", "")
+                except json.JSONDecodeError as ex:
+                    # assume it is plain text
+                    print(f"Encountered error loading last scenario as JSON: {ex}")
+                    last_scenario_text = payload
         except FileNotFoundError:
             pass
 
         checkbox_iterate = gr.Checkbox(label="Iterate seed every line", value=False, elem_id=self.elem_id("checkbox_iterate"))
         checkbox_iterate_batch = gr.Checkbox(label="Use same random seed for all lines", value=True, elem_id=self.elem_id("checkbox_iterate_batch"))
-        every_line_generates = gr.Checkbox(label="Every line generates an image", value=True, elem_id=self.elem_id("every_line_generates"))
+        every_line_generates = gr.Checkbox(label="Every line generates an image", value=False, elem_id=self.elem_id("every_line_generates"))
         prompt_position = gr.Radio(["start", "end"], label="Insert prompts at the", elem_id=self.elem_id("prompt_position"), value="end")
         make_combined = gr.Checkbox(label="Make a combined image containing all outputs (if more than one)", value=False)
 
@@ -392,17 +403,23 @@ class Script(scripts.Script):
         )
 
         # add read-only textboxes that show the base prompts
-        with gr.Accordion("Base prompts (saved)", open=False, elem_id=self.elem_id("base_prompts_acc")):
+        # add padding under the accordion to separate it from the save/load section
+        base_prompts_acc = gr.Accordion("Base prompts (saved)", open=False, elem_id=self.elem_id("base_prompts_acc"))
+        with base_prompts_acc:
             base_prompt_txt = gr.Textbox(
                 label="Base prompt (when saved)",
                 lines=2, elem_id=self.elem_id("base_prompt_txt"),
-                interactive=False
+                interactive=False,
+                value=last_scenario_prompt
             )
             base_neg_prompt_txt = gr.Textbox(
                 label="Base negative prompt (when saved)",
                 lines=2, elem_id=self.elem_id("base_neg_prompt_txt"),
-                interactive=False
+                interactive=False,
+                value=last_scenario_prompt_neg
             )
+            copy_base_btn = gr.Button(value="Copy base prompts to main prompt boxes", elem_id=self.elem_id("copy_base_btn"))
+            _ = gr.Markdown(" ", elem_id=self.elem_id("base_prompts_padding"))
 
         # -----------------------
         # acquire references to base prompts, depending on mode
@@ -432,16 +449,33 @@ class Script(scripts.Script):
             scenario_save_btn = gr.Button(value="Save", scale=0)
             scenario_del_btn = gr.Button(value="Delete", scale=0)
 
-        # add a button that loads _last_scenario.txt into the prompt box
+        # add a button that loads _last_scenario.json into the prompt box
         def load_last_scenario():
             try:
-                with open("_last_scenario.txt", "r") as f:
-                    return f.read()
+                with open("_last_scenario.json", "r") as f:
+                    data = f.read()
+                    try:
+                        payload = json.loads(data)
+                        bp = payload.get("prompt", "")
+                        bnp = payload.get("negative_prompt", "")
+                        should_open = bool((bp or "").strip() or (bnp or "").strip())
+                        return (
+                            payload.get("text", ""),
+                            bp,
+                            bnp,
+                            gr.Accordion(open=should_open),
+                        )
+                    except json.JSONDecodeError:
+                        return (data, "", "", gr.Accordion(open=False))
             except FileNotFoundError:
-                return ""
+                return ("", "", "", gr.Accordion(open=False))
+        
         load_last_btn = gr.Button(value="Load last scenario", elem_id=self.elem_id("load_last_btn"))
-        load_last_btn.click(load_last_scenario, outputs=[prompt_txt])
+        load_last_btn.click(load_last_scenario, outputs=[prompt_txt, base_prompt_txt, base_neg_prompt_txt, base_prompts_acc, ])
 
+        # add a button that copies base_prompt_txt and base_neg_prompt_txt to the actual base prompt components
+        def copy_base_prompts_to_components(base_prompt, base_neg_prompt):
+            return base_prompt, base_neg_prompt
 
         # handlers
         def refresh_scenarios():
@@ -488,17 +522,41 @@ class Script(scripts.Script):
             outputs=[prompt_txt, new_scenario_box, base_prompt_txt, base_neg_prompt_txt]
         )
 
+        copy_base_btn.click(
+            copy_base_prompts_to_components, inputs=[base_prompt_txt, base_neg_prompt_txt], outputs=[base_prompt_comp, base_neg_prompt_comp]
+        )
+    
         return [
             checkbox_iterate, checkbox_iterate_batch, prompt_position,
             prompt_txt,
             make_combined,
-            every_line_generates
+            every_line_generates,
+            scenarios_dropdown,
+            new_scenario_box
         ]
 
-    def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined, every_line_generates):
-        # save prompt text to _last_scenario.txt, just in case
-        with open("_last_scenario.txt", "w") as f:
-            f.write(prompt_txt)
+    def run(self, p, checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt: str, make_combined, every_line_generates, scenarios_dropdown, new_scenario_box):
+        # save prompt text to _last_scenario.json, just in case
+        with open("_last_scenario.json", "w") as f:
+            f.write(json.dumps({
+                "text": prompt_txt,
+                "prompt": p.prompt,
+                "negative_prompt": p.negative_prompt
+            }, indent=4))
+
+        # generate tags for this run
+        run_uuid = str(uuid.uuid4())
+        scenario_name = None
+        if new_scenario_box and str(new_scenario_box).strip():
+            scenario_name = str(new_scenario_box).strip()
+        elif scenarios_dropdown and str(scenarios_dropdown).strip():
+            scenario_name = str(scenarios_dropdown).strip()
+        else:
+            scenario_name = "(unsaved)"
+
+        p.extra_generation_params = p.extra_generation_params or {}
+        p.extra_generation_params["scenario"] = scenario_name
+        p.extra_generation_params["run_uuid"] = run_uuid
 
         # convert text to tree
         base = text_to_tree(prompt_txt, nest_delim='#')
@@ -587,12 +645,30 @@ class Script(scripts.Script):
                 copy_p.prompt = args.get("prompt")[1:]
 
             proc = process_images(copy_p)
+
+            # # Embed metadata into each image's infotext ("parameters")
+            # updated_infotexts = []
+            # for i, img in enumerate(proc.images):
+            #     base_info = proc.infotexts[i] if i < len(proc.infotexts) else ""
+            #     extra = f"\nScenario: {scenario_name}\nRun UUID: {run_uuid}"
+            #     new_info = extra + (base_info or "")
+
+            #     # Make sure the image itself carries the updated parameters too
+            #     img.info["parameters"] = new_info
+
+            #     # Optional: also store as separate keys (may or may not be persisted depending on save path)
+            #     img.info["scenario"] = scenario_name
+            #     img.info["run_uuid"] = run_uuid
+
+            #     updated_infotexts.append(new_info)
+
             images += proc.images
 
             if checkbox_iterate:
                 p.seed = p.seed + (p.batch_size * p.n_iter)
             all_prompts += proc.all_prompts
             infotexts += proc.infotexts
+            # infotexts += updated_infotexts
 
         if make_combined and len(images) > 1:
             combined_image = image_grid(images, batch_size=1, rows=None).convert("RGB")
