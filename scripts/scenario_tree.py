@@ -62,6 +62,7 @@ prompt_tags = {
     "cfg_scale": process_float_tag,
     "width": process_int_tag,
     "height": process_int_tag,
+    "rotate": process_boolean_tag,
     "restore_faces": process_boolean_tag,
     "tiling": process_boolean_tag,
     "do_not_save_samples": process_boolean_tag,
@@ -402,6 +403,41 @@ class Script(scripts.Script):
             value=last_scenario_text
         )
 
+        # add a collapsible section entitled "help" containing a static text element
+        help_acc = gr.Accordion("Help", open=False, elem_id=("help_acc"))
+        with help_acc:
+            _ = gr.Markdown("""
+            Lines without a prefix are concatenated with the base prompt.
+                            
+            Lines with a # prefix are concatenated with lines above them with a "," to separate them.
+                            
+            Multiple # prefixes define nesting, and only the leaves are rendered as images.
+                            
+            Each line is referred to as a "node" in tree created by the # prefixes.
+            A node with no children is referred to as a "leaf node".
+
+            For example, for the base prompt "a young girl in a red dress":
+            ```
+            sitting on a chair
+            # reading a book
+            # looking out the window
+            ```
+            Will produce the following two images:
+            - a young girl in a red dress, sitting on a chair, reading a book
+            - a young girl in a red dress, sitting on a chair, looking out the window
+                            
+            Other prefixes:
+            - ! will force the node to render even if it's a non-leaf node
+            - ? will omit the base prompt, useful for a "scene" image that doesn't involve the character in the base prompt
+            
+            A subset of other flags:
+            `--width <x>`: set the image's width to 'x'
+            `--height <x>`: set the image's height to 'x'
+            `--rotate true`: swap the width and height for this specific image
+            `--restore_faces <true/false>`: enables the face restoring GAN if true, disables it if false
+            """)
+
+
         # add read-only textboxes that show the base prompts
         # add padding under the accordion to separate it from the save/load section
         base_prompts_acc = gr.Accordion("Base prompts (saved)", open=False, elem_id=self.elem_id("base_prompts_acc"))
@@ -614,6 +650,10 @@ class Script(scripts.Script):
         for args in jobs:
             state.job = f"{state.job_no + 1} out of {state.job_count}"
 
+            # if p.rotate, swap width and height
+            if args.get("rotate", False):
+                args["width"], args["height"] = args.get("height", p.height), args.get("width", p.width)
+
             copy_p = copy.copy(p)
             for k, v in args.items():
                 if k == "sd_model":
@@ -645,22 +685,6 @@ class Script(scripts.Script):
                 copy_p.prompt = args.get("prompt")[1:]
 
             proc = process_images(copy_p)
-
-            # # Embed metadata into each image's infotext ("parameters")
-            # updated_infotexts = []
-            # for i, img in enumerate(proc.images):
-            #     base_info = proc.infotexts[i] if i < len(proc.infotexts) else ""
-            #     extra = f"\nScenario: {scenario_name}\nRun UUID: {run_uuid}"
-            #     new_info = extra + (base_info or "")
-
-            #     # Make sure the image itself carries the updated parameters too
-            #     img.info["parameters"] = new_info
-
-            #     # Optional: also store as separate keys (may or may not be persisted depending on save path)
-            #     img.info["scenario"] = scenario_name
-            #     img.info["run_uuid"] = run_uuid
-
-            #     updated_infotexts.append(new_info)
 
             images += proc.images
 
