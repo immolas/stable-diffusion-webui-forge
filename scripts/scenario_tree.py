@@ -327,6 +327,67 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=" , ", ev
 # === main script implementation
 # ===========================================================================
 
+# overrides gradio 4.40.0's improper rendering of backtick sections in markdown
+# fixed in https://github.com/gradio-app/gradio/pull/1615
+css = """
+.gradio-container .prose pre,
+.gradio-container .prose pre code,
+.gradio-container .prose code {
+    color: #f8f8f2 !important;
+}
+
+.gradio-container .prose pre {
+    background-color: #1e1e1e !important;
+    padding: 10px !important;
+    border-radius: 6px !important;
+}
+
+.gradio-container .prose pre code {
+    background: transparent !important;
+}
+
+.gradio-container .prose code {
+    background-color: #2a2a2a !important;
+    border-radius: 6px !important;
+}
+"""
+
+docs = """
+Lines without a prefix are concatenated with the base prompt.
+                
+Lines with a # prefix are concatenated with lines above them with a "," to separate them.
+                
+Multiple # prefixes define nesting, and only the leaves are rendered as images.
+                
+Each line is referred to as a "node" in tree created by the # prefixes.
+A node with no children is referred to as a "leaf node".
+
+For example, for the base prompt "a woman in a red dress":
+```
+sitting on a chair
+# looking out the window
+## moon in window
+## sun in window
+# reading a book
+```
+
+Will produce the following three images:
+- a woman in a red dress, sitting on a chair, looking out the window, moon in window
+- a woman in a red dress, sitting on a chair, looking out the window, sun in window
+- a woman in a red dress, sitting on a chair, reading a book
+
+Other prefixes:
+- ! will force the node to render even if it's a non-leaf node
+- ? will omit the base prompt, useful for a "scene" image that doesn't involve the character in the base prompt
+
+A subset of other flags:       
+- `--width <x>`: set the image's width to 'x'
+- `--height <x>`: set the image's height to 'x'
+- `--rotate true`: swap the width and height for this specific image
+- `--restore_faces <true/false>`: enables the face restoring GAN if true, disables it if false
+
+"""
+
 class Script(scripts.Script):
     # refs to parts of the UI; will be filled by after_component
     txt2img_prompt = None
@@ -371,6 +432,8 @@ class Script(scripts.Script):
 
 
     def ui(self, is_img2img):
+        gr.HTML(f"<style>{css}</style>")
+
         self.scenarios = self._load_scenarios()
 
         # Load last scenario text if it exists
@@ -404,39 +467,9 @@ class Script(scripts.Script):
         )
 
         # add a collapsible section entitled "help" containing a static text element
-        help_acc = gr.Accordion("Help", open=False, elem_id=("help_acc"))
+        help_acc = gr.Accordion("Syntax Help", open=False, elem_id=("help_acc"))
         with help_acc:
-            _ = gr.Markdown("""
-            Lines without a prefix are concatenated with the base prompt.
-                            
-            Lines with a # prefix are concatenated with lines above them with a "," to separate them.
-                            
-            Multiple # prefixes define nesting, and only the leaves are rendered as images.
-                            
-            Each line is referred to as a "node" in tree created by the # prefixes.
-            A node with no children is referred to as a "leaf node".
-
-            For example, for the base prompt "a young girl in a red dress":
-            ```
-            sitting on a chair
-            # reading a book
-            # looking out the window
-            ```
-            Will produce the following two images:
-            - a young girl in a red dress, sitting on a chair, reading a book
-            - a young girl in a red dress, sitting on a chair, looking out the window
-                            
-            Other prefixes:
-            - ! will force the node to render even if it's a non-leaf node
-            - ? will omit the base prompt, useful for a "scene" image that doesn't involve the character in the base prompt
-            
-            A subset of other flags:
-            `--width <x>`: set the image's width to 'x'
-            `--height <x>`: set the image's height to 'x'
-            `--rotate true`: swap the width and height for this specific image
-            `--restore_faces <true/false>`: enables the face restoring GAN if true, disables it if false
-            """)
-
+            _ = gr.Markdown(docs)
 
         # add read-only textboxes that show the base prompts
         # add padding under the accordion to separate it from the save/load section
