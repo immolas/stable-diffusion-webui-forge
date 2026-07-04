@@ -309,9 +309,20 @@ def collect_lines(cur, path=[], results=None, vars_dict=None, join_str=" , ", ev
         # (basically, this causes variable sets and refs to remain in the text)
         _, new_vars_dict = replace_vars(cur['text'], vars_dict=deepcopy(vars_dict))
 
-        for child in cur["children"]:
-            # descend into the children
-            collect_lines(child, path + [cur['text']], results, vars_dict=new_vars_dict, every_line_generates=every_line_generates)
+        if "|" in cur["text"]:
+            # split on pipes, replicate each assignment over the children
+            parts = [x.strip() for x in cur["text"].split("|") if x.strip() != '']
+            for part in parts:
+                # parse variables in the string into the vars dict, but don't retain var resolution in the text
+                _, new_vars_dict = replace_vars(part, vars_dict=deepcopy(vars_dict))
+                # broadcast the part across each child
+                for child in cur["children"]:
+                    # descend into the children
+                    collect_lines(child, path + [part], results, vars_dict=new_vars_dict, every_line_generates=every_line_generates)
+        else:
+            for child in cur["children"]:
+                # descend into the children
+                collect_lines(child, path + [cur['text']], results, vars_dict=new_vars_dict, every_line_generates=every_line_generates)
     else:
         if cur["enabled"]:
             # do full var replacement, since this is a leaf
@@ -353,6 +364,8 @@ css = """
 """
 
 docs = """
+### Basic Usage
+
 Lines without a prefix are concatenated with the base prompt.
                 
 Lines with a # prefix are concatenated with lines above them with a "," to separate them.
@@ -375,6 +388,36 @@ Will produce the following three images:
 - a woman in a red dress, sitting on a chair, looking out the window, moon in window
 - a woman in a red dress, sitting on a chair, looking out the window, sun in window
 - a woman in a red dress, sitting on a chair, reading a book
+
+### Variables
+
+Lines that contain {var_name: text} will set the variable var_name to 'text'
+and will insert it into the prompt at that position. Future references to {var_name} will insert the value of that variable at that position.
+Using {var_name=text} will set the variable but not insert it into the prompt at that position.
+These variables and assignments are available in all child nodes of the node where they are defined.
+
+This is useful for, e.g., removing references to a character's hair color
+if you want to render just their body, e.g. "1girl, {hair:short hair}, standing, posing."
+could be overridden in a child node as "{hair=} closeup of torso" to remove
+the reference to their hair and thus force the model to include their head.
+
+### Broadcasting
+
+A line with a pipe (|) in it will be split on the pipe into separate parts.
+Each part will be treated as a separate node, and the tree of children of that node will
+be replicated for each part. Variable assignments work as expected, too.
+
+For example, for the base prompt "a woman in a red dress":
+```
+sitting on a {color:brown} chair | standing on a {color:blue} chair
+# looking out the {color} window
+```
+
+Will produce the following two images:
+- a woman in a red dress, sitting on a chair, looking out the brown window
+- a woman in a red dress, standing on a chair, looking out the blue window
+
+### More Controls, Flags
 
 Other prefixes:
 - ! will force the node to render even if it's a non-leaf node
